@@ -301,6 +301,24 @@ cat >&2 <<EOF
 
 EOF
 
+if [[ "${RC_MODE}" == "local-tls" && ! "${RC_DOMAIN}" =~ ^[0-9.]+$ ]]; then
+  # Ensure local resolution on this machine
+  if ! grep -qE "(^|\s)${RC_DOMAIN}(\s|$)" /etc/hosts 2>/dev/null; then
+    info "adding ${RC_DOMAIN} to /etc/hosts for local access"
+    run_sh "printf '127.0.0.1 %s\n' '${RC_DOMAIN}' >> /etc/hosts"
+    ok "${RC_DOMAIN} added to /etc/hosts"
+  fi
+
+  primary_ip="$(local_ips | head -1)"
+  cat >&2 <<EOF
+  Local access note:
+    This machine: ${RC_ROOT_URL} is now mapped in /etc/hosts.
+    Other devices on your network: add the following line to their hosts file:
+      ${primary_ip:-<SERVER_IP>} ${RC_DOMAIN}
+
+EOF
+fi
+
 if [[ "${RC_MODE}" == "behind-proxy" ]]; then
   # RC_BIND_ADDRESS says what to listen on; a proxy needs somewhere to connect
   # to, and 0.0.0.0 is not a destination. When bound to every interface the
