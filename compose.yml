@@ -1,0 +1,333 @@
+# Rocket.Chat self-hosted stack.
+#
+# Every value comes from .env, which scripts/configure.sh generates. Do not edit
+# ports or paths here; re-run scripts/configure.sh instead, so that the firewall
+# rules, nginx template and ROOT_URL stay consistent with what is published.
+#
+# Service selection is driven by COMPOSE_PROFILES in .env:
+#   proxy   nginx terminates connections in front of Rocket.Chat
+#   acme    certbot obtains and renews a Let's Encrypt certificate
+#   (none)  behind-proxy mode; compose.direct.yml publishes Rocket.Chat instead
+
+name: ${COMPOSE_PROJECT_NAME:-rocketchat}
+
+x-logging: &default-logging
+  # Uncapped container logs are a slow-motion disk-full outage. A full disk on
+  # this stack surfaces as MongoDB refusing writes, which is a confusing place
+  # to start debugging, so every service is capped.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Database
+  # --------------------------------------------------------------------------
+
+  mongodb-permissions:
+    # The official image runs mongod as uid 1001. A freshly created bind mount
+    # or volume is owned by root, and mongod exits immediately when it cannot
+    # write. This one-shot container fixes ownership before mongod starts.
+    image: docker.io/mongodb/mongodb-community-server:${RC_MONGODB_VERSION:-8.0-ubi8}
+    restart: "no"
+    user: "0"
+    volumes:
+      - ${RC_MONGO_PATH:-mongodb_data}:/data/db:rw
+    networks: [backend]
+    logging: *default-logging
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        owner="$$(stat -c %u /data/db)"
+        if [ "$$owner" != "1001" ]; then
+          echo "fixing /data/db ownership: $$owner -> 1001"
+          chown -R 1001:1001 /data/db
+        else
+          echo "/data/db ownership already correct"
+        fi
+
+  mongodb:
+    image: docker.io/mongodb/mongodb-community-server:${RC_MONGODB_VERSION:-8.0-ubi8}
+    restart: unless-stopped
+    # Pinned so the replica set member address below always resolves. Without
+    # this the container's hostname is its ID, which changes on every recreate.
+    hostname: mongodb
+    user: "1001"
+    # mongod is invoked directly rather than through the image's Python
+    # entrypoint. That entrypoint exists to bootstrap auth, run initdb scripts,
+    # and initialise a replica set — none of which this stack uses, since
+    # mongodb-init does its own rs.initiate(). It also refuses outright to
+    # start on Linux kernel 6.19 or newer, with no environment variable to
+    # override it in any 8.x tag, which would make this stack unrunnable on any
+    # current Arch or Fedora host. See RC_GLIBC_TUNABLES below.
+    entrypoint: ["mongod"]
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    environment:
+      # MongoDB 8.0+ bundles a tcmalloc whose rseq use conflicts with glibc's,
+      # and on kernel 6.19+ mongod segfaults within about 30 seconds. Setting
+      # glibc.pthread.rseq=1 hands rseq to glibc and disables tcmalloc's, which
+      # costs allocator performance but keeps the process alive. It is the
+      # documented workaround, not an officially supported configuration.
+      #
+      # scripts/configure.sh sets this only when the host kernel is 6.19 or
+      # newer. On older kernels it stays empty so tcmalloc keeps its fast path.
+      GLIBC_TUNABLES: ${RC_GLIBC_TUNABLES:-}
+    volumes:
+      - ${RC_MONGO_PATH:-mongodb_data}:/data/db:rw
+    networks: [backend]
+    logging: *default-logging
+    depends_on:
+      mongodb-permissions:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "mongosh", "mongodb://127.0.0.1:27017/?directConnection=true", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
+    # No published port. MongoDB runs without authentication, so the Docker
+    # network is the security boundary. See docs/SECURITY.md.
+
+  mongodb-init:
+    # Rocket.Chat requires a replica set for change streams. The member is
+    # addressed as "mongodb:27017" rather than by the container's own hostname,
+    # because a bare rs.initiate() records the container ID and the replica set
+    # then breaks the first time the container is recreated.
+    image: docker.io/mongodb/mongodb-community-server:${RC_MONGODB_VERSION:-8.0-ubi8}
+    restart: on-failure
+    networks: [backend]
+    logging: *default-logging
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        if mongosh "mongodb://mongodb:27017/?directConnection=true" --quiet \
+             --eval 'rs.status().ok' >/dev/null 2>&1; then
+          echo "replica set rs0 already initialised"
+          exit 0
+        fi
+        echo "initialising replica set rs0"
+        mongosh "mongodb://mongodb:27017/?directConnection=true" --quiet --eval '
+          rs.initiate({_id: "rs0", members: [{_id: 0, host: "mongodb:27017"}]})
+        '
+        echo "waiting for a primary to be elected"
+        mongosh "mongodb://mongodb:27017/?directConnection=true" --quiet --eval '
+          for (let i = 0; i < 60; i++) {
+            if (db.hello().isWritablePrimary) { print("primary ready"); quit(0); }
+            sleep(1000);
+          }
+          print("no primary after 60s"); quit(1);
+        '
+
+  # --------------------------------------------------------------------------
+  # Message transporter
+  #
+  # Rocket.Chat 8.x sets TRANSPORTER to monolith+nats:// by default and the
+  # official compose stack ships NATS alongside it. It is not optional.
+  # --------------------------------------------------------------------------
+
+  nats:
+    image: docker.io/nats:${RC_NATS_VERSION:-2.11-alpine}
+    restart: unless-stopped
+    command: ["--http_port", "8222"]
+    networks: [backend]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # --------------------------------------------------------------------------
+  # Object storage
+  # --------------------------------------------------------------------------
+
+  minio:
+    image: quay.io/minio/minio:${RC_MINIO_VERSION:-RELEASE.2025-09-07T16-13-09Z}
+    restart: unless-stopped
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${RC_MINIO_ROOT_USER:?set by scripts/configure.sh}
+      MINIO_ROOT_PASSWORD: ${RC_MINIO_ROOT_PASSWORD:?set by scripts/configure.sh}
+      # The community console is a read-only object browser as of
+      # RELEASE.2025-05-24; administration is mc only. It is disabled here
+      # because nothing in this stack needs it and it is one less listener.
+      MINIO_BROWSER: "off"
+    volumes:
+      - ${RC_MINIO_PATH:-minio_data}:/data:rw
+    networks: [backend]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  minio-init:
+    # Creates the bucket, the policy, and a least-privilege user for
+    # Rocket.Chat. The root credentials never reach the application.
+    # Idempotent: every step tolerates "already exists".
+    image: quay.io/minio/mc:${RC_MC_VERSION:-RELEASE.2025-08-13T08-35-41Z}
+    restart: on-failure
+    environment:
+      MINIO_ROOT_USER: ${RC_MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${RC_MINIO_ROOT_PASSWORD:?}
+      RC_MINIO_ACCESS_KEY: ${RC_MINIO_ACCESS_KEY:?}
+      RC_MINIO_SECRET_KEY: ${RC_MINIO_SECRET_KEY:?}
+      RC_MINIO_BUCKET: ${RC_MINIO_BUCKET:-rocketchat-uploads}
+    volumes:
+      - ./scripts/minio-init.sh:/minio-init.sh:ro
+    networks: [backend]
+    logging: *default-logging
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/minio-init.sh"]
+
+  # --------------------------------------------------------------------------
+  # Application
+  # --------------------------------------------------------------------------
+
+  rocketchat:
+    image: registry.rocket.chat/rocketchat/rocket.chat:${RC_VERSION:?set by scripts/configure.sh}
+    restart: unless-stopped
+    networks: [backend]
+    logging: *default-logging
+    depends_on:
+      mongodb-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+    environment:
+      ROOT_URL: ${RC_ROOT_URL:?}
+      PORT: 3000
+      DEPLOY_METHOD: docker
+      DEPLOY_PLATFORM: compose
+      MONGO_URL: mongodb://mongodb:27017/rocketchat?replicaSet=rs0
+      TRANSPORTER: monolith+nats://nats:4222
+      ROCKETCHAT_LICENSE: ${RC_LICENSE:-}
+      REG_TOKEN: ${RC_REG_TOKEN:-}
+
+      # --- File storage ---
+      OVERWRITE_SETTING_FileUpload_Enabled: "true"
+      OVERWRITE_SETTING_FileUpload_Storage_Type: AmazonS3
+      OVERWRITE_SETTING_FileUpload_S3_Bucket: ${RC_MINIO_BUCKET:-rocketchat-uploads}
+      OVERWRITE_SETTING_FileUpload_S3_Region: us-east-1
+      OVERWRITE_SETTING_FileUpload_S3_BucketURL: http://minio:9000
+      OVERWRITE_SETTING_FileUpload_S3_AWSAccessKeyId: ${RC_MINIO_ACCESS_KEY:?}
+      OVERWRITE_SETTING_FileUpload_S3_AWSSecretAccessKey: ${RC_MINIO_SECRET_KEY:?}
+      OVERWRITE_SETTING_FileUpload_S3_ForcePathStyle: "true"
+      OVERWRITE_SETTING_FileUpload_S3_URLExpiryTimeSpan: "120"
+      OVERWRITE_SETTING_FileUpload_ProtectFiles: "true"
+      OVERWRITE_SETTING_FileUpload_MaxFileSize: ${RC_MAX_UPLOAD_SIZE:-2147483648}
+
+      # These three are required, not tuning. They default to false, and with
+      # the default Rocket.Chat answers a download with a redirect to a
+      # presigned URL built from FileUpload_S3_BucketURL above. That hostname
+      # only resolves inside the Docker network, so every download would fail
+      # for every client while uploads continued to appear to work.
+      OVERWRITE_SETTING_FileUpload_S3_Proxy_Uploads: "true"
+      OVERWRITE_SETTING_FileUpload_S3_Proxy_Avatars: "true"
+      OVERWRITE_SETTING_FileUpload_S3_Proxy_UserDataFiles: "true"
+    healthcheck:
+      # node is the application runtime, so it is guaranteed present. Tools
+      # like curl or nc are not, and a healthcheck that silently fails to run
+      # is worse than none.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/api/info',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  # --------------------------------------------------------------------------
+  # Reverse proxy (profile: proxy)
+  # --------------------------------------------------------------------------
+
+  nginx:
+    image: docker.io/nginx:${RC_NGINX_VERSION:-1.30-alpine}
+    profiles: [proxy]
+    restart: unless-stopped
+    networks: [backend]
+    logging: *default-logging
+    ports:
+      - "${RC_BIND_ADDRESS:-0.0.0.0}:${RC_HTTP_PORT:-80}:80"
+      - "${RC_BIND_ADDRESS:-0.0.0.0}:${RC_HTTPS_PORT:-443}:443"
+    environment:
+      # The nginx image runs envsubst over /etc/nginx/templates/**.template at
+      # startup and writes the result into /etc/nginx/conf.d. The filter limits
+      # substitution to RC_-prefixed names so that nginx's own $host,
+      # $remote_addr and friends survive untouched.
+      NGINX_ENVSUBST_FILTER: "^RC_"
+      NGINX_ENVSUBST_TEMPLATE_DIR: /etc/nginx/templates/${RC_NGINX_TEMPLATE:-${RC_MODE:-public-tls}}
+      RC_DOMAIN: ${RC_DOMAIN:?}
+      RC_MAX_UPLOAD_SIZE: ${RC_MAX_UPLOAD_SIZE:-2147483648}
+      RC_HTTPS_PORT_SUFFIX: ${RC_HTTPS_PORT_SUFFIX:-}
+    volumes:
+      # Templates are mounted read-only; /etc/nginx/conf.d is deliberately left
+      # writable because the entrypoint renders into it.
+      - ./nginx/templates:/etc/nginx/templates:ro
+      # Included by absolute path from outside conf.d, so nginx's own
+      # `include /etc/nginx/conf.d/*.conf` does not try to load it standalone.
+      - ./nginx/ssl-params.conf:/etc/nginx/ssl-params.conf:ro
+      - letsencrypt_data:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      rocketchat:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://127.0.0.1:80/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # --------------------------------------------------------------------------
+  # Certificates (profile: acme)
+  #
+  # Not a long-running service. scripts/issue-cert.sh and scripts/renew-cert.sh
+  # invoke it with `docker compose run --rm certbot ...`.
+  # --------------------------------------------------------------------------
+
+  certbot:
+    image: docker.io/certbot/certbot:${RC_CERTBOT_VERSION:-v5.8.0}
+    profiles: [acme]
+    restart: "no"
+    networks: [backend]
+    logging: *default-logging
+    volumes:
+      - letsencrypt_data:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    entrypoint: ["certbot"]
+
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        # Chosen by scripts/configure.sh from the ranges not already used by
+        # other Docker networks on this host.
+        - subnet: ${RC_NETWORK_SUBNET:-172.28.0.0/24}
+
+volumes:
+  # Declared unconditionally. When RC_MONGO_PATH or RC_MINIO_PATH holds an
+  # absolute path instead, compose treats it as a bind mount and these go
+  # unused, which is harmless.
+  mongodb_data:
+  minio_data:
+  letsencrypt_data:
+  certbot_webroot:

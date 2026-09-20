@@ -1,0 +1,24 @@
+# Bootstrap configuration: HTTP only, no certificate referenced.
+#
+# This is what nginx runs before a certificate exists. It is the reason
+# certificate issuance can succeed at all: the HTTPS configuration references
+# /etc/letsencrypt/live/<domain>/fullchain.pem, which is absent on a first
+# install, so nginx would fail to start; and certbot's HTTP-01 challenge needs
+# something already answering on port 80. Each would be waiting on the other.
+#
+# scripts/issue-cert.sh starts nginx with this template, obtains the
+# certificate, then recreates nginx with the real one.
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        default_type text/plain;
+        return 503 "Provisioning TLS certificate. This is expected during installation.\n";
+    }
+}

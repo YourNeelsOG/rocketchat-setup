@@ -1,0 +1,24 @@
+# Generated configuration. Contains the MinIO credentials in plaintext.
+# Nothing here is ever safe to commit.
+.env
+.env.*
+!.env.example
+
+# Self-signed certificates and the local CA private key.
+certs/
+
+# Rendered nginx configuration, if anything writes one locally.
+nginx/conf.d/
+nginx/nginx.conf
+
+# Backups. These hold a full copy of every message and file.
+backups/
+*.archive.gz
+
+# Logs written by the scheduled jobs.
+*.log
+
+# Editor and OS noise.
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,16 @@
+# Overlay used only in behind-proxy mode.
+#
+# Selected by COMPOSE_FILE in .env, which scripts/configure.sh sets to
+# "compose.yml:compose.direct.yml" when the operator already runs their own
+# reverse proxy. It publishes Rocket.Chat on a plain HTTP port for that proxy
+# to forward to, and no nginx or certbot from this stack is started.
+#
+# Terminate TLS at your proxy and forward to this port. Your proxy must pass
+# the WebSocket upgrade headers and raise its own body-size limit to match
+# RC_MAX_UPLOAD_SIZE, or realtime messaging and large uploads will fail.
+# scripts/setup.sh prints a ready-made snippet for common proxies.
+
+services:
+  rocketchat:
+    ports:
+      - "${RC_BIND_ADDRESS:-127.0.0.1}:${RC_APP_PORT:-3000}:3000"
