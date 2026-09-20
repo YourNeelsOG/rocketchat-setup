@@ -6,7 +6,7 @@
 # no deployment decisions of its own: every choice is collected by
 # scripts/configure.sh, either interactively or from flags.
 #
-#   curl -fsSL https://raw.githubusercontent.com/YourNeelsOG/rocketchat-deploy/main/install.sh -o install.sh
+#   curl -fsSL https://raw.githubusercontent.com/YourNeelsOG/rocketchat-setup/main/install.sh -o install.sh
 #   less install.sh
 #   sudo bash install.sh
 #
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-REPO_URL="${RC_REPO_URL:-https://github.com/YourNeelsOG/rocketchat-deploy.git}"
+REPO_URL="${RC_REPO_URL:-https://github.com/YourNeelsOG/rocketchat-setup.git}"
 REPO_REF="${RC_REPO_REF:-main}"
 DATA_DIR="/opt/rocketchat"
 DRY_RUN=0

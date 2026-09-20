@@ -139,6 +139,6 @@ Monthly is a reasonable cadence:
 ## Reporting a problem
 
 Open an issue at
-`https://github.com/YourNeelsOG/rocketchat-deploy/issues` for problems with
+`https://github.com/YourNeelsOG/rocketchat-setup/issues` for problems with
 this deployment tooling. Vulnerabilities in Rocket.Chat, MongoDB, NATS or MinIO
 belong upstream with those projects.

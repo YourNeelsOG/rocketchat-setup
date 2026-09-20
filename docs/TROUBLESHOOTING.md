@@ -335,5 +335,5 @@ grep -vE 'PASSWORD|SECRET|ACCESS_KEY|ROOT_USER' .env >> /tmp/rc-health.txt
 
 Check that the redaction worked before sending it anywhere.
 
-Deployment problems: <https://github.com/YourNeelsOG/rocketchat-deploy/issues>.
+Deployment problems: <https://github.com/YourNeelsOG/rocketchat-setup/issues>.
 Rocket.Chat problems: <https://forums.rocket.chat>.

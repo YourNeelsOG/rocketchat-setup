@@ -1,4 +1,4 @@
-# rocketchat-deploy
+# rocketchat-setup
 
 Self-hosted Rocket.Chat on one Linux machine: Rocket.Chat, MongoDB, NATS and
 MinIO behind nginx, with TLS, backups and an upgrade path.
@@ -13,7 +13,7 @@ any) it should touch, and whether it should schedule anything at all.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YourNeelsOG/rocketchat-deploy/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/YourNeelsOG/rocketchat-setup/main/install.sh -o install.sh
 ```
 
 Read it, then run it:
