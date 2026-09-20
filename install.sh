@@ -186,9 +186,9 @@ if [[ "$DRY_RUN" == "1" ]]; then
   # Still run the configuration questions in dry-run, so the operator sees the
   # whole flow and the resulting plan without anything being changed.
   [[ -x "$DATA_DIR/scripts/configure.sh" ]] \
-    && exec "$DATA_DIR/scripts/configure.sh" "${PASSTHROUGH[@]:-}"
+    && exec "$DATA_DIR/scripts/configure.sh" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
   exit 0
 fi
 
 cd "$DATA_DIR"
-exec ./scripts/setup.sh "${PASSTHROUGH[@]:-}"
+exec ./scripts/setup.sh ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
