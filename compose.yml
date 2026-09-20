@@ -290,7 +290,7 @@ services:
       rocketchat:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "wget --quiet --spider http://127.0.0.1:80/ || exit 1"]
+      test: ["CMD-SHELL", "wget --quiet --spider --no-check-certificate http://127.0.0.1:80/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
