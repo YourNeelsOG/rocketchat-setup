@@ -152,6 +152,29 @@ if [[ "$SKIP_FIREWALL" != "1" && "${RC_FIREWALL:-none}" != "none" ]]; then
   if confirm_typed "Apply these firewall rules?" "yes"; then
     case "${RC_FIREWALL}" in
       ufw)
+        if ! command -v ufw >/dev/null 2>&1; then
+          info "ufw is not installed; installing it..."
+          distro="$(detect_distro)"
+          SUDO_CMD=""
+          [[ "$(id -u)" != "0" ]] && SUDO_CMD="sudo"
+          case "$distro" in
+            debian)
+              run $SUDO_CMD apt-get update
+              run $SUDO_CMD apt-get install -y ufw
+              ;;
+            arch)
+              run $SUDO_CMD pacman -Sy --needed --noconfirm ufw
+              ;;
+            rhel)
+              run $SUDO_CMD dnf install -y ufw || run $SUDO_CMD yum install -y epel-release && run $SUDO_CMD yum install -y ufw
+              ;;
+            *)
+              die "could not automatically install ufw on $distro. Please install ufw manually."
+              ;;
+          esac
+          ok "ufw installed successfully"
+        fi
+
         # Order matters. The allow rule for SSH is added before enable, so
         # there is never a moment where the policy is default-deny without it.
         for p in "${ports_to_open[@]}"; do run ufw allow "${p}/tcp"; done
