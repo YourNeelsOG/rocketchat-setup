@@ -116,48 +116,30 @@ for k in "${!CLI[@]}"; do printf -v "$k" '%s' "${CLI[$k]}"; export "${k?}"; done
 
 # ---------------------------------------------------------------------------
 # Section 1: deployment mode
-#
-# This is the question the previous version of this project never asked. It
-# assumed a public server with a public DNS record and nothing else on 80/443.
 # ---------------------------------------------------------------------------
 
-heading "== Rocket.Chat deployment: configuration =="
-hint "Every answer can also be passed as a flag; run with --help to see them."
+clear 2>/dev/null || true
+print_signature
+print_header_box "YOURNEELS" "Rocket.Chat Automated Production Wizard"
 
-RC_MODE="$(pick RC_MODE 'Where will this run?' \
-  'Public server, real domain, automatic Let'"'"'s Encrypt certificate' 'public-tls' \
-  'Local or LAN server, self-signed certificate generated here'        'local-tls' \
-  'Behind a reverse proxy I already run (Caddy, Traefik, nginx, NPM)'  'behind-proxy' \
-  'Plain HTTP, no TLS (isolated network or testing only)'              'plain-http')"
+RC_MODE="$(pick RC_MODE 'Select deployment mode:' \
+  'Local / LAN server (Tailscale or local network, self-signed TLS)' 'local-tls' \
+  'Plain HTTP (No SSL, ideal for private Tailscale/LAN, no CA needed)' 'plain-http' \
+  'Public server (Real domain with automatic Let'"'"'s Encrypt certificate)' 'public-tls' \
+  'Behind an existing reverse proxy (Caddy, Nginx Proxy Manager, Traefik)' 'behind-proxy')"
 
 case "$RC_MODE" in
   public-tls)
-    hint "Requires a public IP and a DNS record already pointing at this host."
+    hint "Requires a public IP and a DNS record pointing to this host."
     ;;
   local-tls)
-    warn "Self-signed certificates are rejected by the Rocket.Chat mobile apps"
-    warn "unless the generated CA is installed on each device. The CA certificate"
-    warn "will be written to DATA_DIR/certs/ca.crt with import instructions."
+    hint "Self-signed certificate will be created. CA cert saved to certs/ca.crt."
     ;;
   behind-proxy)
-    hint "No certificate is issued and no nginx runs. Rocket.Chat is published on"
-    hint "a plain HTTP port for your existing proxy to forward to."
+    hint "Publishes on a local port for your proxy to forward to."
     ;;
   plain-http)
-    warn "Without TLS, logins and messages cross the network in cleartext."
-    warn "Use this only on a network you fully control, and never on the internet."
-    # An unattended run cannot fall into this mode by accident: the operator
-    # has to say so a second time, with a flag that is hard to type by mistake.
-    if [[ "$ASSUME_YES" == "1" ]]; then
-      [[ "${RC_ACCEPT_NO_TLS:-0}" == "1" ]] || die \
-        "plain-http disables transport encryption entirely, so an unattended run
-      will not select it on the strength of --mode alone. Add --accept-no-tls if
-      that is genuinely what you want, or choose local-tls, which needs no public
-      DNS and still encrypts."
-      warn "--accept-no-tls given; proceeding without encryption"
-    elif ! confirm 'Continue with no encryption?' default_no; then
-      die "aborted: choose public-tls, local-tls or behind-proxy instead"
-    fi
+    hint "No TLS overhead. Ideal for private VPNs like Tailscale."
     ;;
 esac
 
@@ -165,49 +147,62 @@ esac
 # Section 2: identity
 # ---------------------------------------------------------------------------
 
-heading "-- Address --"
+heading "-- Address & Hostname --"
 
 if [[ "$RC_MODE" == "public-tls" ]]; then
-  RC_DOMAIN="$(prompt_value RC_DOMAIN 'Domain name clients will use' '' valid_fqdn)"
-  RC_LE_EMAIL="$(prompt_value RC_LE_EMAIL 'Email for certificate expiry notices' '' valid_email)"
-  hint "Use an address you actually read: it is the only warning you get before expiry."
+  RC_DOMAIN="$(prompt_value RC_DOMAIN 'Enter domain name (e.g. chat.yourdomain.com)' '' valid_fqdn)"
+  RC_LE_EMAIL="$(prompt_value RC_LE_EMAIL 'Email address for Let'"'"'s Encrypt certificate' '' valid_email)"
 else
-  default_host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)"
-  RC_DOMAIN="$(prompt_value RC_DOMAIN 'Hostname or IP clients will use' "$default_host" valid_hostname)"
+  # Collect available IP choices (Tailscale IP, LAN IP, localhost)
+  ips_available=()
+  ip_picker_args=()
+
+  # Check for tailscale IP
+  ts_ip="$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || true)"
+  if [[ -n "$ts_ip" ]]; then
+    ip_picker_args+=("Tailscale IP (${ts_ip}) — for devices in your Tailscale mesh" "$ts_ip")
+  fi
+
+  # Check for LAN IP
+  for lip in $(local_ips); do
+    [[ "$lip" == "$ts_ip" ]] && continue
+    ip_picker_args+=("LAN IP (${lip}) — for local Wi-Fi / LAN devices" "$lip")
+    break
+  done
+
+  default_host="$(hostname -s 2>/dev/null || echo localhost)"
+  ip_picker_args+=(
+    "Local machine only (127.0.0.1 / localhost)" "127.0.0.1"
+    "Custom hostname or domain (e.g. rocket.neels)" "custom"
+  )
+
+  if [[ -z "${RC_DOMAIN:-}" ]]; then
+    chosen_addr="$(pick RC_CHOSEN_ADDR 'How do you want to access Rocket.Chat?' "${ip_picker_args[@]}")"
+    if [[ "$chosen_addr" == "custom" ]]; then
+      RC_DOMAIN="$(prompt_value RC_DOMAIN 'Enter custom hostname or domain' "$default_host" valid_hostname)"
+    else
+      RC_DOMAIN="$chosen_addr"
+    fi
+  else
+    RC_DOMAIN="$(prompt_value RC_DOMAIN 'Hostname or IP clients will use' "$RC_DOMAIN" valid_hostname)"
+  fi
   RC_LE_EMAIL="${RC_LE_EMAIL:-}"
 fi
 
 # ---------------------------------------------------------------------------
-# Section 3: ports
-#
-# Probed rather than assumed. On a machine already serving something, 80 and
-# 443 are frequently taken, and discovering that after the stack half-starts is
-# a bad experience.
+# Section 3: ports & binding
 # ---------------------------------------------------------------------------
 
-heading "-- Ports --"
-
-# The safe default differs by mode. In behind-proxy mode the published port
-# carries unencrypted HTTP, so binding it to every interface would expose the
-# application to the whole network alongside the proxy that is supposed to be
-# the only way in. Loopback is offered first there, and is what an
-# unattended run picks.
 if [[ "$RC_MODE" == "behind-proxy" ]]; then
-  RC_BIND_ADDRESS="$(pick RC_BIND_ADDRESS 'Which address should the Rocket.Chat port bind to?' \
-    'Loopback only (127.0.0.1) — proxy runs on this same host (recommended)'  '127.0.0.1' \
-    'All interfaces (0.0.0.0) — proxy runs on a different host'               '0.0.0.0')"
-  [[ "$RC_BIND_ADDRESS" == "0.0.0.0" ]] && \
-    warn "plain HTTP will be reachable from the network; restrict it at the firewall to your proxy's address"
+  RC_BIND_ADDRESS="${RC_BIND_ADDRESS:-127.0.0.1}"
 else
-  RC_BIND_ADDRESS="$(pick RC_BIND_ADDRESS 'Which address should the published ports bind to?' \
-    'All interfaces (0.0.0.0) — reachable from the network'                   '0.0.0.0' \
-    'Loopback only (127.0.0.1) — for a proxy running on this same host'       '127.0.0.1')"
+  RC_BIND_ADDRESS="${RC_BIND_ADDRESS:-0.0.0.0}"
 fi
 
 # Offers the next free port when the wanted one is taken, and names the holder.
 choose_port() {
   local var="$1" question="$2" want="$3" chosen holder alt
-  chosen="$(prompt_value "$var" "$question" "$want" valid_port)"
+  chosen="$(prompt_value "$var" "$question" "$want" valid_port)" || exit 1
   while port_in_use "$chosen"; do
     holder="$(port_holder "$chosen")"
     warn "port ${chosen} is already in use by: ${holder}"
@@ -216,7 +211,7 @@ choose_port() {
       die "port ${chosen} is in use and --non-interactive cannot choose another; pass a free port explicitly"
     fi
     printf -v "$var" '%s' ''
-    chosen="$(prompt_value "$var" "  pick a different port for ${question,,}" "${alt:-}" valid_port)"
+    chosen="$(prompt_value "$var" "  pick a different port for ${question,,}" "${alt:-}" valid_port)" || exit 1
   done
   printf '%s' "$chosen"
 }
@@ -396,13 +391,8 @@ fi
 
 if [[ "$RC_FIREWALL" != "none" ]]; then
   detected_ssh="$(detect_ssh_port)"
-  RC_SSH_PORT="$(prompt_value RC_SSH_PORT 'SSH port that must stay open' "$detected_ssh" valid_port)"
-  warn "An allow rule for port ${RC_SSH_PORT} is added BEFORE the firewall is enabled."
-  warn "If SSH is actually on a different port, you will lose access to this machine."
-  if ! confirm "Is ${RC_SSH_PORT} definitely the port you connect to?" default_yes; then
-    RC_SSH_PORT=''
-    RC_SSH_PORT="$(prompt_value RC_SSH_PORT 'SSH port that must stay open' '' valid_port)"
-  fi
+  RC_SSH_PORT="${RC_SSH_PORT:-$detected_ssh}"
+  info "Firewall will keep SSH port ${RC_SSH_PORT}/tcp open."
 else
   RC_SSH_PORT="${RC_SSH_PORT:-$(detect_ssh_port)}"
 fi
@@ -484,21 +474,21 @@ esac
 # Review and write
 # ---------------------------------------------------------------------------
 
-heading "== Review =="
+heading "== Review Configuration =="
 cat >&2 <<EOF
-  Mode                ${RC_MODE}
-  Public URL          ${RC_ROOT_URL}
-  Published ports     ${RC_BIND_ADDRESS}: ${RC_HTTP_PORT:-—} (http) ${RC_HTTPS_PORT:-—} (https) ${RC_APP_PORT:-—} (app)
-  Install directory   ${RC_DATA_DIR}
-  MongoDB data        ${RC_MONGO_PATH:-docker volume ${RC_PROJECT_NAME}_mongodb_data}
-  Uploaded files      ${RC_MINIO_PATH:-docker volume ${RC_PROJECT_NAME}_minio_data}
-  Backups             ${RC_BACKUP_DIR}
-  Upload ceiling      ${RC_MAX_UPLOAD_SIZE} bytes ($((RC_MAX_UPLOAD_SIZE / 1073741824)) GiB)
-  Rocket.Chat         ${RC_VERSION}
-  Compose project     ${RC_PROJECT_NAME}
-  Docker subnet       ${RC_NETWORK_SUBNET}
-  Firewall            ${RC_FIREWALL}$([[ "$RC_FIREWALL" != none ]] && echo " (SSH kept open on ${RC_SSH_PORT})")
-  Scheduling          ${RC_SCHEDULE}$([[ "$RC_SCHEDULE" != none ]] && echo " (backup daily at ${RC_BACKUP_TIME})")
+  ${C_CYAN}Mode:${C_RESET}                ${C_BOLD}${RC_MODE}${C_RESET}
+  ${C_CYAN}Public URL:${C_RESET}          ${C_GREEN}${RC_ROOT_URL}${C_RESET}
+  ${C_CYAN}Published ports:${C_RESET}     ${RC_BIND_ADDRESS}: ${RC_HTTP_PORT:-—} (http) ${RC_HTTPS_PORT:-—} (https) ${RC_APP_PORT:-—} (app)
+  ${C_CYAN}Install directory:${C_RESET}   ${RC_DATA_DIR}
+  ${C_CYAN}MongoDB data:${C_RESET}        ${RC_MONGO_PATH:-docker volume ${RC_PROJECT_NAME}_mongodb_data}
+  ${C_CYAN}Uploaded files:${C_RESET}      ${RC_MINIO_PATH:-docker volume ${RC_PROJECT_NAME}_minio_data}
+  ${C_CYAN}Backups:${C_RESET}             ${RC_BACKUP_DIR}
+  ${C_CYAN}Upload ceiling:${C_RESET}      ${RC_MAX_UPLOAD_SIZE} bytes ($((RC_MAX_UPLOAD_SIZE / 1073741824)) GiB)
+  ${C_CYAN}Rocket.Chat:${C_RESET}         ${RC_VERSION}
+  ${C_CYAN}Compose project:${C_RESET}     ${RC_PROJECT_NAME}
+  ${C_CYAN}Docker subnet:${C_RESET}       ${RC_NETWORK_SUBNET}
+  ${C_CYAN}Firewall:${C_RESET}            ${RC_FIREWALL}$([[ "$RC_FIREWALL" != none ]] && echo " (SSH kept open on ${RC_SSH_PORT})")
+  ${C_CYAN}Scheduling:${C_RESET}          ${RC_SCHEDULE}$([[ "$RC_SCHEDULE" != none ]] && echo " (backup daily at ${RC_BACKUP_TIME})")
 EOF
 
 if [[ "$ASSUME_YES" != "1" ]]; then

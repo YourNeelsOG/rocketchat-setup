@@ -17,11 +17,41 @@ set -euo pipefail
 
 if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
-  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'; C_PURPLE=$'\033[35m'; C_CYAN=$'\033[36m'; C_WHITE=$'\033[37m'
+  C_GRAD1=$'\033[38;2;0;255;255m'
+  C_GRAD2=$'\033[38;2;0;210;255m'
+  C_GRAD3=$'\033[38;2;0;170;255m'
+  C_GRAD4=$'\033[38;2;60;130;255m'
+  C_GRAD5=$'\033[38;2;120;90;255m'
+  C_GRAD6=$'\033[38;2;170;60;255m'
 else
   C_RESET=''; C_BOLD=''; C_DIM=''
-  C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''
+  C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_PURPLE=''; C_CYAN=''; C_WHITE=''
+  C_GRAD1=''; C_GRAD2=''; C_GRAD3=''; C_GRAD4=''; C_GRAD5=''; C_GRAD6=''
 fi
+
+print_signature() {
+  printf '\n' >&2
+  printf '  %s██╗   ██╗ ██████╗ ██╗   ██╗██████╗ ███╗   ██╗███████╗███████╗██╗     ███████╗%s\n' "$C_GRAD1" "$C_RESET" >&2
+  printf '  %s╚██╗ ██╔╝██╔═══██╗██║   ██║██╔══██╗████╗  ██║██╔════╝██╔════╝██║     ██╔════╝%s\n' "$C_GRAD2" "$C_RESET" >&2
+  printf '   %s╚████╔╝ ██║   ██║██║   ██║██████╔╝██╔██╗ ██║█████╗  █████╗  ██║     ███████╗%s\n' "$C_GRAD3" "$C_RESET" >&2
+  printf '    %s╚██╔╝  ██║   ██║██║   ██║██╔══██╗██║╚██╗██║██╔══╝  ██╔══╝  ██║     ╚════██║%s\n' "$C_GRAD4" "$C_RESET" >&2
+  printf '     %s██║   ╚██████╔╝╚██████╔╝██║  ██║██║ ╚████║███████╗███████╗███████╗███████║%s\n' "$C_GRAD5" "$C_RESET" >&2
+  printf '     %s╚═╝    ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝╚══════╝%s\n' "$C_GRAD6" "$C_RESET" >&2
+  printf '\n' >&2
+  printf '                          %s%sPRESENT%s  %s%sROCKET CHAT SETUP%s\n' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_WHITE" "$C_RESET" >&2
+  printf '\n' >&2
+}
+
+print_header_box() {
+  local title="${1:-YOURNEELS}"
+  local desc="${2:-Rocket.Chat Automated Production Wizard}"
+  printf '  %s╭──────────────────────────────────────────────────────────────────────────╮%s\n' "$C_CYAN" "$C_RESET" >&2
+  printf '  %s│%s  %s%-12s%s %s%-57s%s  %s│%s\n' \
+    "$C_CYAN" "$C_RESET" "$C_BOLD$C_WHITE" "$title" "$C_RESET" "$C_DIM" "$desc" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
+  printf '  %s╰──────────────────────────────────────────────────────────────────────────╯%s\n\n' "$C_CYAN" "$C_RESET" >&2
+}
 
 # All diagnostics go to stderr so that a function's stdout stays usable as a
 # return value. prompt_* functions depend on this.
@@ -205,20 +235,32 @@ pick() {
 
   if [[ "$ASSUME_YES" == "1" ]]; then printf '%s' "${values[0]}"; return 0; fi
 
-  heading "$question"
+  local q_line="╭─ ${question} "
+  local target_len=76
+  local rem=$((target_len - ${#q_line} - 1))
+  if ((rem < 3)); then rem=3; fi
+  local bar=""
+  printf -v bar '%*s' "$rem" ''
+  bar="${bar// /─}"
+  printf '  %s%s%s╮%s\n' "$C_CYAN" "$q_line" "$bar" "$C_RESET" >&2
   for i in "${!labels[@]}"; do
-    printf '  %s%d)%s %s\n' "$C_BOLD" "$((i + 1))" "$C_RESET" "${labels[$i]}" >&2
+    printf '    %s[%d]%s  %s%s%s' "$C_CYAN$C_BOLD" "$((i + 1))" "$C_RESET" "$C_BOLD$C_WHITE" "${labels[$i]}" "$C_RESET" >&2
+    if ((i == 0)); then
+      printf ' %s(default)%s\n' "$C_DIM" "$C_RESET" >&2
+    else
+      printf '\n' >&2
+    fi
   done
+  printf '  %s╰──────────────────────────────────────────────────────────────────────────╯%s\n\n' "$C_CYAN" "$C_RESET" >&2
   while true; do
-    printf '%s?%s select 1-%d %s[1]%s ' \
-      "$C_BOLD" "$C_RESET" "${#labels[@]}" "$C_DIM" "$C_RESET" >&2
+    printf '  %sSelect option%s %s➜%s ' "$C_BOLD$C_WHITE" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
     read -r answer || die "input closed"
     answer="${answer:-1}"
     if [[ "$answer" =~ ^[0-9]+$ ]] && ((answer >= 1 && answer <= ${#values[@]})); then
       printf '%s' "${values[$((answer - 1))]}"
       return 0
     fi
-    warn "enter a number between 1 and ${#labels[@]}"
+    warn "Please enter a valid option number between 1 and ${#labels[@]}"
   done
 }
 
@@ -285,6 +327,7 @@ valid_hhmm() {
 # absent on minimal server images, so neither is relied on.
 port_in_use() {
   local port="$1"
+  [[ -z "$port" ]] && return 1
   if command -v ss >/dev/null 2>&1; then
     ss -Hltn "sport = :${port}" 2>/dev/null | grep -q . && return 0
     return 1

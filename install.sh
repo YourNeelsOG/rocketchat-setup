@@ -28,10 +28,20 @@ PASSTHROUGH=()
 # its own minimal output helpers rather than depending on one.
 if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
-  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'; C_PURPLE=$'\033[35m'; C_CYAN=$'\033[36m'; C_WHITE=$'\033[37m'
+  C_GRAD1=$'\033[38;2;0;255;255m'
+  C_GRAD2=$'\033[38;2;0;210;255m'
+  C_GRAD3=$'\033[38;2;0;170;255m'
+  C_GRAD4=$'\033[38;2;60;130;255m'
+  C_GRAD5=$'\033[38;2;120;90;255m'
+  C_GRAD6=$'\033[38;2;170;60;255m'
 else
-  C_RESET=''; C_BOLD=''; C_DIM=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''
+  C_RESET=''; C_BOLD=''; C_DIM=''
+  C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_PURPLE=''; C_CYAN=''; C_WHITE=''
+  C_GRAD1=''; C_GRAD2=''; C_GRAD3=''; C_GRAD4=''; C_GRAD5=''; C_GRAD6=''
 fi
+
 info() { printf '%s[ .. ]%s %s\n' "$C_BLUE"   "$C_RESET" "$*" >&2; }
 ok()   { printf '%s[ ok ]%s %s\n' "$C_GREEN"  "$C_RESET" "$*" >&2; }
 warn() { printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
@@ -58,24 +68,21 @@ while (($#)); do
   esac
 done
 
-cat >&2 <<EOF
-
-${C_BOLD}Rocket.Chat self-hosted installer${C_RESET}
-
-This installs a Rocket.Chat stack: Rocket.Chat, MongoDB, NATS, MinIO, and
-optionally nginx with a TLS certificate.
-
-It will, on this machine:
-  - install docker, docker compose, git, openssl and curl if they are missing
-  - enable the Docker daemon at boot
-  - clone ${REPO_URL} into ${DATA_DIR}
-  - ask you where and how to run, then start the stack
-
-It will ask before touching the firewall, and it never writes a credential into
-a file that is readable by anyone but root. Run with --dry-run to see every
-command without executing any of them.
-
-EOF
+clear 2>/dev/null || true
+printf '\n'
+printf '  %s██╗   ██╗ ██████╗ ██╗   ██╗██████╗ ███╗   ██╗███████╗███████╗██╗     ███████╗%s\n' "$C_GRAD1" "$C_RESET"
+printf '  %s╚██╗ ██╔╝██╔═══██╗██║   ██║██╔══██╗████╗  ██║██╔════╝██╔════╝██║     ██╔════╝%s\n' "$C_GRAD2" "$C_RESET"
+printf '   %s╚████╔╝ ██║   ██║██║   ██║██████╔╝██╔██╗ ██║█████╗  █████╗  ██║     ███████╗%s\n' "$C_GRAD3" "$C_RESET"
+printf '    %s╚██╔╝  ██║   ██║██║   ██║██╔══██╗██║╚██╗██║██╔══╝  ██╔══╝  ██║     ╚════██║%s\n' "$C_GRAD4" "$C_RESET"
+printf '     %s██║   ╚██████╔╝╚██████╔╝██║  ██║██║ ╚████║███████╗███████╗███████╗███████║%s\n' "$C_GRAD5" "$C_RESET"
+printf '     %s╚═╝    ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝╚══════╝%s\n' "$C_GRAD6" "$C_RESET"
+printf '\n'
+printf '                          %s%sPRESENT%s  %s%sROCKET CHAT SETUP%s\n' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_WHITE" "$C_RESET"
+printf '\n'
+printf '  %s╭──────────────────────────────────────────────────────────────────────────╮%s\n' "$C_CYAN" "$C_RESET"
+printf '  %s│%s  %s%-12s%s %s%-57s%s  %s│%s\n' \
+  "$C_CYAN" "$C_RESET" "$C_BOLD$C_WHITE" "YOURNEELS" "$C_RESET" "$C_DIM" "Rocket.Chat Automated Production Installer" "$C_RESET" "$C_CYAN" "$C_RESET"
+printf '  %s╰──────────────────────────────────────────────────────────────────────────╯%s\n\n' "$C_CYAN" "$C_RESET"
 
 [[ "$DRY_RUN" == "1" ]] || [[ "$(id -u)" == "0" ]] \
   || die "this installer must run as root: sudo bash $0"
