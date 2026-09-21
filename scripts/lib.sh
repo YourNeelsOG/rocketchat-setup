@@ -53,6 +53,37 @@ print_header_box() {
   printf '  %s╰──────────────────────────────────────────────────────────────────────────╯%s\n\n' "$C_CYAN" "$C_RESET" >&2
 }
 
+fresh_page() {
+  local step="${1:-}"
+  local subtitle="${2:-Rocket.Chat Automated Production Wizard}"
+
+  # Only clear screen when attached to an interactive terminal
+  if [[ -t 1 || -t 2 ]] && [[ "${ASSUME_YES:-0}" != "1" ]]; then
+    clear 2>/dev/null || true
+  fi
+
+  print_signature
+  print_header_box "YOURNEELS" "$subtitle"
+
+  if [[ -n "$step" ]]; then
+    local step_line="╭─ ${step} "
+    local target_len=76
+    local rem=$((target_len - ${#step_line} - 1))
+    if ((rem < 3)); then rem=3; fi
+    local bar=""
+    printf -v bar '%*s' "$rem" ''
+    bar="${bar// /─}"
+    printf '  %s%s%s╮%s\n\n' "$C_PURPLE$C_BOLD" "$step_line" "$bar" "$C_RESET" >&2
+  fi
+}
+
+page_step() {
+  local var="$1" step="$2" subtitle="${3:-Rocket.Chat Automated Production Wizard}"
+  if [[ -z "${!var:-}" ]] && [[ "${ASSUME_YES:-0}" != "1" ]]; then
+    fresh_page "$step" "$subtitle"
+  fi
+}
+
 # All diagnostics go to stderr so that a function's stdout stays usable as a
 # return value. prompt_* functions depend on this.
 log()     { printf '%s\n' "$*" >&2; }
@@ -153,11 +184,24 @@ prompt_value() {
     return 0
   fi
 
+  local q_line="╭─ ${question} "
+  local target_len=76
+  local rem=$((target_len - ${#q_line} - 1))
+  if ((rem < 3)); then rem=3; fi
+  local bar=""
+  printf -v bar '%*s' "$rem" ''
+  bar="${bar// /─}"
+  printf '  %s%s%s╮%s\n' "$C_CYAN" "$q_line" "$bar" "$C_RESET" >&2
+  if [[ -n "$default" ]]; then
+    printf '    %sDefault:%s %s%s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD$C_GREEN" "$default" "$C_RESET" >&2
+  fi
+  printf '  %s╰──────────────────────────────────────────────────────────────────────────╯%s\n\n' "$C_CYAN" "$C_RESET" >&2
+
   while true; do
     if [[ -n "$default" ]]; then
-      printf '%s?%s %s %s[%s]%s ' "$C_BOLD" "$C_RESET" "$question" "$C_DIM" "$default" "$C_RESET" >&2
+      printf '  %sEnter value%s %s[%s]%s %s➜%s ' "$C_BOLD$C_WHITE" "$C_RESET" "$C_DIM" "$default" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
     else
-      printf '%s?%s %s ' "$C_BOLD" "$C_RESET" "$question" >&2
+      printf '  %sEnter value%s %s➜%s ' "$C_BOLD$C_WHITE" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
     fi
     read -r answer || die "input closed"
     answer="${answer:-$default}"
@@ -174,7 +218,7 @@ prompt_secret() {
   local __var="$1" question="$2" preset="${!__var:-}" answer
   if [[ -n "$preset" ]]; then printf '%s' "$preset"; return 0; fi
   if [[ "$ASSUME_YES" == "1" ]]; then printf ''; return 0; fi
-  printf '%s?%s %s ' "$C_BOLD" "$C_RESET" "$question" >&2
+  printf '  %s?%s %s %s➜%s ' "$C_BOLD$C_CYAN" "$C_RESET" "$question" "$C_CYAN" "$C_RESET" >&2
   read -rs answer || die "input closed"
   printf '\n' >&2
   printf '%s' "$answer"
@@ -189,7 +233,7 @@ confirm() {
   local hint_text='y/N'
   [[ "$default" == "default_yes" ]] && hint_text='Y/n'
   while true; do
-    printf '%s?%s %s %s[%s]%s ' "$C_BOLD" "$C_RESET" "$question" "$C_DIM" "$hint_text" "$C_RESET" >&2
+    printf '  %s?%s %s %s[%s]%s %s➜%s ' "$C_CYAN$C_BOLD" "$C_RESET" "$C_BOLD$C_WHITE$question$C_RESET" "$C_DIM" "$hint_text" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
     read -r answer || die "input closed"
     answer="${answer:-}"
     case "${answer,,}" in
@@ -210,8 +254,8 @@ confirm_typed() {
     warn "--non-interactive: auto-confirming '${expected}'"
     return 0
   fi
-  printf '%s?%s %s\n  type %s%s%s to confirm: ' \
-    "$C_BOLD" "$C_RESET" "$question" "$C_BOLD" "$expected" "$C_RESET" >&2
+  printf '  %s?%s %s\n  %sType %s%s%s to confirm %s➜%s ' \
+    "$C_YELLOW$C_BOLD" "$C_RESET" "$C_BOLD$C_WHITE$question$C_RESET" "$C_DIM" "$C_BOLD$C_GREEN" "$expected" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
   read -r answer || die "input closed"
   [[ "$answer" == "$expected" ]]
 }

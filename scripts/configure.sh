@@ -118,9 +118,7 @@ for k in "${!CLI[@]}"; do printf -v "$k" '%s' "${CLI[$k]}"; export "${k?}"; done
 # Section 1: deployment mode
 # ---------------------------------------------------------------------------
 
-clear 2>/dev/null || true
-print_signature
-print_header_box "YOURNEELS" "Rocket.Chat Automated Production Wizard"
+page_step RC_MODE "1. Deployment Mode"
 
 RC_MODE="$(pick RC_MODE 'Select deployment mode:' \
   'Local / LAN server (Tailscale or local network, self-signed TLS)' 'local-tls' \
@@ -128,29 +126,18 @@ RC_MODE="$(pick RC_MODE 'Select deployment mode:' \
   'Public server (Real domain with automatic Let'"'"'s Encrypt certificate)' 'public-tls' \
   'Behind an existing reverse proxy (Caddy, Nginx Proxy Manager, Traefik)' 'behind-proxy')"
 
-case "$RC_MODE" in
-  public-tls)
-    hint "Requires a public IP and a DNS record pointing to this host."
-    ;;
-  local-tls)
-    hint "Self-signed certificate will be created. CA cert saved to certs/ca.crt."
-    ;;
-  behind-proxy)
-    hint "Publishes on a local port for your proxy to forward to."
-    ;;
-  plain-http)
-    hint "No TLS overhead. Ideal for private VPNs like Tailscale."
-    ;;
-esac
-
 # ---------------------------------------------------------------------------
 # Section 2: identity
 # ---------------------------------------------------------------------------
 
-heading "-- Address & Hostname --"
-
 if [[ "$RC_MODE" == "public-tls" ]]; then
+  page_step RC_DOMAIN "2. Domain Name"
+  hint "Requires a public IP and a DNS record pointing to this host."
   RC_DOMAIN="$(prompt_value RC_DOMAIN 'Enter domain name (e.g. chat.yourdomain.com)' '' valid_fqdn)"
+
+  page_step RC_LE_EMAIL "3. Let's Encrypt Contact Email"
+  hint "Domain: ${RC_DOMAIN}"
+  hint "Used by Let's Encrypt for certificate notices and expiry alerts."
   RC_LE_EMAIL="$(prompt_value RC_LE_EMAIL 'Email address for Let'"'"'s Encrypt certificate' '' valid_email)"
 else
   # Collect available IP choices (Tailscale IP, LAN IP, localhost)
@@ -177,13 +164,16 @@ else
   )
 
   if [[ -z "${RC_DOMAIN:-}" ]]; then
+    page_step RC_CHOSEN_ADDR "2. Access Address"
     chosen_addr="$(pick RC_CHOSEN_ADDR 'How do you want to access Rocket.Chat?' "${ip_picker_args[@]}")"
     if [[ "$chosen_addr" == "custom" ]]; then
+      page_step RC_DOMAIN "2. Custom Hostname / Domain"
       RC_DOMAIN="$(prompt_value RC_DOMAIN 'Enter custom hostname or domain' "$default_host" valid_hostname)"
     else
       RC_DOMAIN="$chosen_addr"
     fi
   else
+    page_step RC_DOMAIN "2. Hostname or IP"
     RC_DOMAIN="$(prompt_value RC_DOMAIN 'Hostname or IP clients will use' "$RC_DOMAIN" valid_hostname)"
   fi
   RC_LE_EMAIL="${RC_LE_EMAIL:-}"
@@ -205,20 +195,27 @@ choose_port() {
   chosen="$(prompt_value "$var" "$question" "$want" valid_port)" || exit 1
   while port_in_use "$chosen"; do
     holder="$(port_holder "$chosen")"
-    warn "port ${chosen} is already in use by: ${holder}"
-    alt="$(next_free_port "$((chosen + 1))" || true)"
     if [[ "$ASSUME_YES" == "1" ]]; then
       die "port ${chosen} is in use and --non-interactive cannot choose another; pass a free port explicitly"
     fi
+    alt="$(next_free_port "$((chosen + 1))" || true)"
+    fresh_page "Port Conflict Resolution"
+    warn "port ${chosen} is already in use by: ${holder}"
+    hint "suggested free port: ${alt:-none found}"
     printf -v "$var" '%s' ''
-    chosen="$(prompt_value "$var" "  pick a different port for ${question,,}" "${alt:-}" valid_port)" || exit 1
+    chosen="$(prompt_value "$var" "Pick a different port for ${question,,}" "${alt:-}" valid_port)" || exit 1
   done
   printf '%s' "$chosen"
 }
 
 case "$RC_MODE" in
   public-tls|local-tls)
+    page_step RC_HTTP_PORT "3. HTTP Port"
+    [[ "$RC_MODE" == "public-tls" ]] && hint "Let's Encrypt HTTP-01 validation connects to port 80."
     RC_HTTP_PORT="$(choose_port RC_HTTP_PORT 'HTTP port' 80)"
+
+    page_step RC_HTTPS_PORT "4. HTTPS Port"
+    hint "HTTPS port clients will connect to."
     RC_HTTPS_PORT="$(choose_port RC_HTTPS_PORT 'HTTPS port' 443)"
     RC_APP_PORT=''
     if [[ "$RC_MODE" == "public-tls" && "$RC_HTTP_PORT" != "80" ]]; then
@@ -229,12 +226,16 @@ case "$RC_MODE" in
     fi
     ;;
   plain-http)
+    page_step RC_HTTP_PORT "3. HTTP Port"
+    hint "Plain HTTP mode does not terminate SSL."
     RC_HTTP_PORT="$(choose_port RC_HTTP_PORT 'HTTP port' 80)"
     RC_HTTPS_PORT=''
     RC_APP_PORT=''
     ;;
   behind-proxy)
     RC_HTTP_PORT=''; RC_HTTPS_PORT=''
+    page_step RC_APP_PORT "3. Application Port"
+    hint "Publishes on a local port for your reverse proxy (e.g. Caddy, NPM, Traefik) to forward to."
     RC_APP_PORT="$(choose_port RC_APP_PORT 'Host port to publish Rocket.Chat on' 3000)"
     ;;
 esac
@@ -246,10 +247,11 @@ esac
 # names, or network subnet. All three are checked.
 # ---------------------------------------------------------------------------
 
-heading "-- Docker --"
-
+page_step RC_PROJECT_NAME "5. Docker Project Name"
+hint "Namespace for Docker Compose containers, volumes, and networks."
 RC_PROJECT_NAME="$(prompt_value RC_PROJECT_NAME 'Compose project name' 'rocketchat' valid_project_name)"
 while compose_project_exists "$RC_PROJECT_NAME"; do
+  fresh_page "Docker Project Conflict"
   warn "a compose project named '${RC_PROJECT_NAME}' already has containers on this host"
   hint "reusing the name would adopt or replace them; a different name keeps them separate"
   if [[ "$ASSUME_YES" == "1" ]]; then
@@ -259,11 +261,14 @@ while compose_project_exists "$RC_PROJECT_NAME"; do
     break
   fi
   RC_PROJECT_NAME=''
+  fresh_page "Docker Project Name"
   RC_PROJECT_NAME="$(prompt_value RC_PROJECT_NAME 'Compose project name' '' valid_project_name)"
 done
 
 if [[ -z "${RC_NETWORK_SUBNET:-}" ]]; then
+  page_step RC_NETWORK_SUBNET "6. Docker Network Subnet"
   suggested="$(free_docker_subnet || echo '172.28.0.0/24')"
+  hint "Isolated /24 bridge network subnet for the Rocket.Chat containers."
   RC_NETWORK_SUBNET="$(prompt_value RC_NETWORK_SUBNET 'Subnet for this stack'"'"'s Docker network' "$suggested")"
 fi
 
@@ -275,16 +280,21 @@ fi
 # the filesystem check, not just the install directory.
 # ---------------------------------------------------------------------------
 
-heading "-- Storage --"
-
+page_step RC_DATA_DIR "7. Install Directory"
+hint "Root folder where compose files, scripts, and local configs will reside."
 RC_DATA_DIR="$(prompt_value RC_DATA_DIR 'Install directory' '/opt/rocketchat' valid_abspath)"
 
+page_step RC_STORAGE_CHOICE "8. Storage Location"
+hint "Install directory: ${RC_DATA_DIR}"
 storage_choice="$(pick RC_STORAGE_CHOICE 'Where should MongoDB and uploaded files live?' \
   "Docker named volumes (under $(docker_root))" 'volumes' \
   'A directory I choose (a dedicated disk, for example)' 'hostpath')"
 
 if [[ "$storage_choice" == "hostpath" ]]; then
+  page_step RC_MONGO_PATH "8a. MongoDB Storage Directory"
   RC_MONGO_PATH="$(prompt_value RC_MONGO_PATH 'Directory for MongoDB data' "$RC_DATA_DIR/data/mongo" valid_abspath)"
+
+  page_step RC_MINIO_PATH "8b. Upload Storage Directory (MinIO)"
   RC_MINIO_PATH="$(prompt_value RC_MINIO_PATH 'Directory for uploaded files' "$RC_DATA_DIR/data/minio" valid_abspath)"
 else
   RC_MONGO_PATH=''; RC_MINIO_PATH=''
@@ -306,6 +316,8 @@ case "$mongo_fs" in
   *)       ok "MongoDB data path is on ${mongo_fs}" ;;
 esac
 
+page_step RC_BACKUP_DIR "9. Backup Directory"
+hint "Directory where daily snapshots and database dumps will be saved."
 RC_BACKUP_DIR="$(prompt_value RC_BACKUP_DIR 'Backup directory' "$RC_DATA_DIR/backups" valid_abspath)"
 
 # MongoDB 8.0+ will not run on kernel 6.19 or newer without handing rseq to
@@ -320,21 +332,20 @@ if [[ -n "$RC_GLIBC_TUNABLES" ]]; then
   hint "supported configuration, but it keeps the database running."
 fi
 
-heading "-- Uploads --"
+page_step RC_MAX_UPLOAD_SIZE "10. Maximum Upload Size"
 hint "Rocket.Chat has no resumable upload: an interrupted transfer restarts from zero."
-hint "The file is also buffered by the application before it reaches object storage,"
-hint "so a large ceiling on a small-memory host risks the out-of-memory killer."
-hint "This host has $(total_ram_gb) GB of RAM. 2 GiB is a safe starting ceiling."
+hint "The file is also buffered by the application before it reaches object storage."
+hint "This host has $(total_ram_gb) GB of RAM. 2147483648 bytes (2 GiB) is recommended."
 RC_MAX_UPLOAD_SIZE="$(prompt_value RC_MAX_UPLOAD_SIZE 'Maximum upload size in bytes' '2147483648' valid_bytes)"
 
 # ---------------------------------------------------------------------------
 # Section 6: version
 # ---------------------------------------------------------------------------
 
-heading "-- Version --"
+page_step RC_VERSION "11. Rocket.Chat Version"
 
 if [[ -z "${RC_VERSION:-}" && "$ASSUME_YES" != "1" ]]; then
-  info "checking which Rocket.Chat releases are currently supported"
+  info "checking which Rocket.Chat releases are currently supported..."
   if supported="$("$SCRIPT_DIR/supported-versions.sh" 2>/dev/null)" && [[ -n "$supported" ]]; then
     printf '%s\n' "$supported" >&2
   else
@@ -347,6 +358,7 @@ RC_VERSION="$(pick RC_VERSION 'Rocket.Chat version' \
   '8.8.1  — newest release, supported until 2027-03-31'                    '8.8.1' \
   'Enter a different version'                                              'custom')"
 if [[ "$RC_VERSION" == "custom" ]]; then
+  fresh_page "11. Custom Rocket.Chat Version"
   RC_VERSION=''
   RC_VERSION="$(prompt_value RC_VERSION 'Rocket.Chat version tag' '')"
   warn "verify ${RC_VERSION} is still supported: scripts/supported-versions.sh"
@@ -363,7 +375,7 @@ RC_REG_TOKEN="${RC_REG_TOKEN:-}"
 # no way back in.
 # ---------------------------------------------------------------------------
 
-heading "-- Firewall --"
+page_step RC_FIREWALL "12. Host Firewall"
 
 detected_fw="$(detect_firewall)"
 case "$detected_fw" in
@@ -405,7 +417,7 @@ fi
 # to miss later.
 # ---------------------------------------------------------------------------
 
-heading "-- Scheduled jobs --"
+page_step RC_SCHEDULE "13. Scheduled Maintenance"
 
 sched_default='none'
 if command -v systemctl >/dev/null 2>&1; then sched_default='systemd'
@@ -427,6 +439,8 @@ if [[ -z "${RC_SCHEDULE:-}" ]]; then
 fi
 
 if [[ "$RC_SCHEDULE" != "none" ]]; then
+  page_step RC_BACKUP_TIME "14. Daily Backup Time"
+  hint "Schedule mode: ${RC_SCHEDULE}"
   RC_BACKUP_TIME="$(prompt_value RC_BACKUP_TIME 'Daily backup time (HH:MM, host local time)' '03:00' valid_hhmm)"
 else
   RC_BACKUP_TIME="${RC_BACKUP_TIME:-03:00}"
@@ -447,6 +461,8 @@ case "$RC_MODE" in
   behind-proxy)
     # The operator's proxy terminates TLS, so ROOT_URL must describe what the
     # client sees, not what this stack publishes. Asked, never assumed.
+    page_step RC_ROOT_URL "15. Public Proxy URL"
+    hint "The operator's proxy terminates TLS, so ROOT_URL must describe what clients see."
     RC_ROOT_URL="$(prompt_value RC_ROOT_URL 'Public URL your proxy will serve this on' "https://${RC_DOMAIN}")"
     ;;
 esac
@@ -474,7 +490,7 @@ esac
 # Review and write
 # ---------------------------------------------------------------------------
 
-heading "== Review Configuration =="
+fresh_page "Review & Confirmation" "Rocket.Chat Configuration Review"
 cat >&2 <<EOF
   ${C_CYAN}Mode:${C_RESET}                ${C_BOLD}${RC_MODE}${C_RESET}
   ${C_CYAN}Public URL:${C_RESET}          ${C_GREEN}${RC_ROOT_URL}${C_RESET}
