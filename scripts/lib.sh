@@ -53,6 +53,37 @@ print_header_box() {
   printf '  %s╰──────────────────────────────────────────────────────────────────────────╯%s\n\n' "$C_CYAN" "$C_RESET" >&2
 }
 
+fresh_page() {
+  local step="${1:-}"
+  local subtitle="${2:-Rocket.Chat Automated Production Wizard}"
+
+  # Only clear screen when attached to an interactive terminal
+  if [[ -t 1 || -t 2 ]] && [[ "${ASSUME_YES:-0}" != "1" ]]; then
+    clear 2>/dev/null || true
+  fi
+
+  print_signature
+  print_header_box "YOURNEELS" "$subtitle"
+
+  if [[ -n "$step" ]]; then
+    local step_line="╭─ ${step} "
+    local target_len=76
+    local rem=$((target_len - ${#step_line} - 1))
+    if ((rem < 3)); then rem=3; fi
+    local bar=""
+    printf -v bar '%*s' "$rem" ''
+    bar="${bar// /─}"
+    printf '  %s%s%s╮%s\n\n' "$C_PURPLE$C_BOLD" "$step_line" "$bar" "$C_RESET" >&2
+  fi
+}
+
+page_step() {
+  local var="$1" step="$2" subtitle="${3:-Rocket.Chat Automated Production Wizard}"
+  if [[ -z "${!var:-}" ]] && [[ "${ASSUME_YES:-0}" != "1" ]]; then
+    fresh_page "$step" "$subtitle"
+  fi
+}
+
 # All diagnostics go to stderr so that a function's stdout stays usable as a
 # return value. prompt_* functions depend on this.
 log()     { printf '%s\n' "$*" >&2; }
@@ -153,11 +184,24 @@ prompt_value() {
     return 0
   fi
 
+  local q_line="╭─ ${question} "
+  local target_len=76
+  local rem=$((target_len - ${#q_line} - 1))
+  if ((rem < 3)); then rem=3; fi
+  local bar=""
+  printf -v bar '%*s' "$rem" ''
+  bar="${bar// /─}"
+  printf '  %s%s%s╮%s\n' "$C_CYAN" "$q_line" "$bar" "$C_RESET" >&2
+  if [[ -n "$default" ]]; then
+    printf '    %sDefault:%s %s%s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD$C_GREEN" "$default" "$C_RESET" >&2
+  fi
+  printf '  %s╰──────────────────────────────────────────────────────────────────────────╯%s\n\n' "$C_CYAN" "$C_RESET" >&2
+
   while true; do
     if [[ -n "$default" ]]; then
-      printf '%s?%s %s %s[%s]%s ' "$C_BOLD" "$C_RESET" "$question" "$C_DIM" "$default" "$C_RESET" >&2
+      printf '  %sEnter value%s %s[%s]%s %s➜%s ' "$C_BOLD$C_WHITE" "$C_RESET" "$C_DIM" "$default" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
     else
-      printf '%s?%s %s ' "$C_BOLD" "$C_RESET" "$question" >&2
+      printf '  %sEnter value%s %s➜%s ' "$C_BOLD$C_WHITE" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
     fi
     read -r answer || die "input closed"
     answer="${answer:-$default}"
@@ -174,7 +218,7 @@ prompt_secret() {
   local __var="$1" question="$2" preset="${!__var:-}" answer
   if [[ -n "$preset" ]]; then printf '%s' "$preset"; return 0; fi
   if [[ "$ASSUME_YES" == "1" ]]; then printf ''; return 0; fi
-  printf '%s?%s %s ' "$C_BOLD" "$C_RESET" "$question" >&2
+  printf '  %s?%s %s %s➜%s ' "$C_BOLD$C_CYAN" "$C_RESET" "$question" "$C_CYAN" "$C_RESET" >&2
   read -rs answer || die "input closed"
   printf '\n' >&2
   printf '%s' "$answer"
@@ -189,7 +233,7 @@ confirm() {
   local hint_text='y/N'
   [[ "$default" == "default_yes" ]] && hint_text='Y/n'
   while true; do
-    printf '%s?%s %s %s[%s]%s ' "$C_BOLD" "$C_RESET" "$question" "$C_DIM" "$hint_text" "$C_RESET" >&2
+    printf '  %s?%s %s %s[%s]%s %s➜%s ' "$C_CYAN$C_BOLD" "$C_RESET" "$C_BOLD$C_WHITE$question$C_RESET" "$C_DIM" "$hint_text" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
     read -r answer || die "input closed"
     answer="${answer:-}"
     case "${answer,,}" in
@@ -210,8 +254,8 @@ confirm_typed() {
     warn "--non-interactive: auto-confirming '${expected}'"
     return 0
   fi
-  printf '%s?%s %s\n  type %s%s%s to confirm: ' \
-    "$C_BOLD" "$C_RESET" "$question" "$C_BOLD" "$expected" "$C_RESET" >&2
+  printf '  %s?%s %s\n  %sType %s%s%s to confirm %s➜%s ' \
+    "$C_YELLOW$C_BOLD" "$C_RESET" "$C_BOLD$C_WHITE$question$C_RESET" "$C_DIM" "$C_BOLD$C_GREEN" "$expected" "$C_RESET" "$C_CYAN" "$C_RESET" >&2
   read -r answer || die "input closed"
   [[ "$answer" == "$expected" ]]
 }
@@ -367,17 +411,43 @@ next_free_port() {
   return 1
 }
 
-# The port sshd is actually listening on. Reads the config rather than guessing
-# 22, because locking out an admin who moved SSH is the worst failure this
-# installer can cause.
+# The port sshd is actually listening on. Reads the active connection, config files,
+# drop-ins, and listening sockets rather than guessing 22, because locking out
+# an admin who moved SSH to another port (e.g. 23, 2222) is catastrophic.
 detect_ssh_port() {
   local port=''
-  if [[ -r /etc/ssh/sshd_config ]]; then
-    port="$(awk '/^[[:space:]]*Port[[:space:]]+[0-9]+/ {print $2; exit}' /etc/ssh/sshd_config 2>/dev/null || true)"
+
+  # 1. If currently connected over SSH, detect the server port of THIS session
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    port="$(awk '{print $4}' <<<"$SSH_CONNECTION" 2>/dev/null || true)"
+  elif [[ -n "${SSH_CLIENT:-}" ]]; then
+    port="$(awk '{print $3}' <<<"$SSH_CLIENT" 2>/dev/null || true)"
   fi
+
+  # 2. Query sshd directly (parses main config + /etc/ssh/sshd_config.d/*.conf)
+  if [[ -z "$port" ]] && command -v sshd >/dev/null 2>&1; then
+    port="$((sshd -T 2>/dev/null || true) | awk '/^port[[:space:]]+[0-9]+/ {print $2; exit}' || true)"
+  fi
+
+  # 3. Read sshd_config and any drop-in configuration files
+  if [[ -z "$port" ]]; then
+    port="$(grep -shEI '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2; exit}' || true)"
+  fi
+
+  # 4. Check systemd socket-activated SSH (Ubuntu 22.10+, 24.04+)
+  if [[ -z "$port" ]] && command -v systemctl >/dev/null 2>&1; then
+    local sock_stream
+    sock_stream="$(systemctl cat ssh.socket 2>/dev/null | grep -i '^[[:space:]]*ListenStream=' | head -n1 | sed 's/.*=//' | tr -d ' ' || true)"
+    if [[ -n "$sock_stream" ]]; then
+      port="${sock_stream##*:}"
+    fi
+  fi
+
+  # 5. Check live listening sockets using ss
   if [[ -z "$port" ]] && command -v ss >/dev/null 2>&1; then
-    port="$(ss -Hltnp 2>/dev/null | awk '/sshd/ {split($4,a,":"); print a[length(a)]; exit}' || true)"
+    port="$(ss -Hltnp 2>/dev/null | awk '/(sshd|ssh\.socket)/ {split($4,a,":"); print a[length(a)]; exit}' || true)"
   fi
+
   printf '%s' "${port:-22}"
 }
 
