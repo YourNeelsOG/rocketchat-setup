@@ -411,17 +411,43 @@ next_free_port() {
   return 1
 }
 
-# The port sshd is actually listening on. Reads the config rather than guessing
-# 22, because locking out an admin who moved SSH is the worst failure this
-# installer can cause.
+# The port sshd is actually listening on. Reads the active connection, config files,
+# drop-ins, and listening sockets rather than guessing 22, because locking out
+# an admin who moved SSH to another port (e.g. 23, 2222) is catastrophic.
 detect_ssh_port() {
   local port=''
-  if [[ -r /etc/ssh/sshd_config ]]; then
-    port="$(awk '/^[[:space:]]*Port[[:space:]]+[0-9]+/ {print $2; exit}' /etc/ssh/sshd_config 2>/dev/null || true)"
+
+  # 1. If currently connected over SSH, detect the server port of THIS session
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    port="$(awk '{print $4}' <<<"$SSH_CONNECTION" 2>/dev/null || true)"
+  elif [[ -n "${SSH_CLIENT:-}" ]]; then
+    port="$(awk '{print $3}' <<<"$SSH_CLIENT" 2>/dev/null || true)"
   fi
+
+  # 2. Query sshd directly (parses main config + /etc/ssh/sshd_config.d/*.conf)
+  if [[ -z "$port" ]] && command -v sshd >/dev/null 2>&1; then
+    port="$((sshd -T 2>/dev/null || true) | awk '/^port[[:space:]]+[0-9]+/ {print $2; exit}' || true)"
+  fi
+
+  # 3. Read sshd_config and any drop-in configuration files
+  if [[ -z "$port" ]]; then
+    port="$(grep -shEI '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2; exit}' || true)"
+  fi
+
+  # 4. Check systemd socket-activated SSH (Ubuntu 22.10+, 24.04+)
+  if [[ -z "$port" ]] && command -v systemctl >/dev/null 2>&1; then
+    local sock_stream
+    sock_stream="$(systemctl cat ssh.socket 2>/dev/null | grep -i '^[[:space:]]*ListenStream=' | head -n1 | sed 's/.*=//' | tr -d ' ' || true)"
+    if [[ -n "$sock_stream" ]]; then
+      port="${sock_stream##*:}"
+    fi
+  fi
+
+  # 5. Check live listening sockets using ss
   if [[ -z "$port" ]] && command -v ss >/dev/null 2>&1; then
-    port="$(ss -Hltnp 2>/dev/null | awk '/sshd/ {split($4,a,":"); print a[length(a)]; exit}' || true)"
+    port="$(ss -Hltnp 2>/dev/null | awk '/(sshd|ssh\.socket)/ {split($4,a,":"); print a[length(a)]; exit}' || true)"
   fi
+
   printf '%s' "${port:-22}"
 }
 

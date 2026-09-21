@@ -135,7 +135,17 @@ ok "all services reported healthy"
 if [[ "$SKIP_FIREWALL" != "1" && "${RC_FIREWALL:-none}" != "none" ]]; then
   heading "== Firewall =="
 
+  local detected_current_ssh
+  detected_current_ssh="$(detect_ssh_port)"
+  RC_SSH_PORT="${RC_SSH_PORT:-$detected_current_ssh}"
   ports_to_open=("${RC_SSH_PORT}")
+
+  # If current active SSH session or daemon is on a port different from RC_SSH_PORT,
+  # ensure that active port is also included so the user is never locked out.
+  if [[ -n "$detected_current_ssh" && "$detected_current_ssh" != "$RC_SSH_PORT" ]]; then
+    warn "Active SSH session detected on port ${detected_current_ssh}; also keeping it open."
+    ports_to_open+=("${detected_current_ssh}")
+  fi
   case "${RC_MODE}" in
     public-tls|local-tls) ports_to_open+=("${RC_HTTP_PORT}" "${RC_HTTPS_PORT}") ;;
     plain-http)           ports_to_open+=("${RC_HTTP_PORT}") ;;
@@ -146,8 +156,8 @@ if [[ "$SKIP_FIREWALL" != "1" && "${RC_FIREWALL:-none}" != "none" ]]; then
   log "  These rules will be added, SSH first:"
   for p in "${ports_to_open[@]}"; do log "    allow ${p}/tcp"; done
   log ""
-  warn "If SSH is not actually on port ${RC_SSH_PORT}, enabling the firewall will"
-  warn "lock you out of this machine with no way back in over the network."
+  warn "SSH port ${RC_SSH_PORT} is allowed by the firewall."
+  warn "If your SSH server listens on another port, ensure it is open so you are not locked out."
 
   if confirm_typed "Apply these firewall rules?" "yes"; then
     case "${RC_FIREWALL}" in

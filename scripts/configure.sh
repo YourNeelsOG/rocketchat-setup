@@ -403,7 +403,10 @@ fi
 
 if [[ "$RC_FIREWALL" != "none" ]]; then
   detected_ssh="$(detect_ssh_port)"
-  RC_SSH_PORT="${RC_SSH_PORT:-$detected_ssh}"
+  page_step RC_SSH_PORT "12b. SSH Port"
+  hint "Detected SSH port on this host: ${detected_ssh}"
+  hint "The firewall will explicitly allow this port so you don't get locked out."
+  RC_SSH_PORT="$(prompt_value RC_SSH_PORT 'SSH port to keep open in firewall' "${detected_ssh}" valid_port)"
   info "Firewall will keep SSH port ${RC_SSH_PORT}/tcp open."
 else
   RC_SSH_PORT="${RC_SSH_PORT:-$(detect_ssh_port)}"
